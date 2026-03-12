@@ -1441,3 +1441,4 @@
 /build/project_description.json
 /build/project_elf_src_esp32.c
 /build/x509_crt_bundle.S
+/components/Assets/old/
