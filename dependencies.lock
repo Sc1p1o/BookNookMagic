@@ -1,8 +1,32 @@
 dependencies:
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.5.3
+  espressif/esp_lcd_gc9a01:
+    component_hash: 2ccbdfa5a1762c7a8be66770b69a256d809651d6069098852d2c829648707b5b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.2.0
   idf:
     source:
       type: idf
-    version: 5.5.3
+    version: 6.0.0
   waveshare/esp_lcd_st7735:
     component_hash: 811c4168555af5878eb9ec8c3eee8af277afebc3bc516bc0daa57656eee09c69
     dependencies: []
@@ -11,8 +35,9 @@ dependencies:
       type: service
     version: 1.0.1
 direct_dependencies:
+- espressif/esp_lcd_gc9a01
 - idf
 - waveshare/esp_lcd_st7735
-manifest_hash: 8216fef2e932264bf6c874b346f3f093fd76d57d9d7330f98b9220c83ec97e7d
+manifest_hash: e9f6244053780c09f4e47f8dc4a285bd8f18e6dfc175914d60d27c8c5ddce767
 target: esp32
 version: 2.0.0
