@@ -1,191 +1,144 @@
 #include <stdio.h>
-#include <string.h>
 #include "esp_err.h"
 #include "esp_log.h"
-#include "driver/spi_master.h"
 #include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "raw_lcd";
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
 
-#define PIN_NUM_SCLK      18
-#define PIN_NUM_MOSI      23
-#define PIN_NUM_CS        25
-#define PIN_NUM_DC        26
-#define PIN_NUM_RST       27
+// ST7735 Treiber aus managed_components:
+#include "esp_lcd_st7735.h"
 
-#define TFT_WIDTH         240
-#define TFT_HEIGHT        240
+#include "Flame1.h"
+#include "FlameUnified1.h"
+#include "FlameUnified2.h"
+#include "FlameUnified3.h"
+#include "FlameUnified4.h"
+#include "FlameUnified6.h"
+#include "FlameUnified7.h"
+#include "FlameUnified8.h"
+#include "FlameUnified9.h"
 
-static spi_device_handle_t lcd_spi;
 
-static void lcd_reset(void)
+static const char *TAG = "tft";
+
+#define PIN_NUM_SCLK    18   // SCK
+#define PIN_NUM_MOSI    23   // SDA (MOSI)
+#define PIN_NUM_CS      5    // CS
+#define PIN_NUM_DC      16   // A0 (D/C)
+#define PIN_NUM_RST     17   // RESET
+#define PIN_NUM_BCKL    4    // LED (Backlight) - optional, -1 wenn fest an 3V3
+
+#define TFT_H_RES       128
+#define TFT_V_RES       160
+
+#define FRAME_TIME_MS   200
+
+
+static void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565)
 {
-    gpio_set_level(PIN_NUM_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    gpio_set_level(PIN_NUM_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    gpio_set_level(PIN_NUM_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
-}
-
-static void lcd_send_cmd(uint8_t cmd)
-{
-    spi_transaction_t t;
-    memset(&t, 0, sizeof(t));
-
-    t.length = 8;
-    t.tx_buffer = &cmd;
-
-    gpio_set_level(PIN_NUM_DC, 0);
-    ESP_ERROR_CHECK(spi_device_polling_transmit(lcd_spi, &t));
-}
-
-static void lcd_send_data(const void *data, int len_bytes)
-{
-    if (len_bytes <= 0) {
-        return;
+    static uint16_t line[TFT_H_RES];
+    for (int x = 0; x < TFT_H_RES; x++) {
+        line[x] = color_rgb565;
     }
-
-    spi_transaction_t t;
-    memset(&t, 0, sizeof(t));
-
-    t.length = len_bytes * 8;
-    t.tx_buffer = data;
-
-    gpio_set_level(PIN_NUM_DC, 1);
-    ESP_ERROR_CHECK(spi_device_polling_transmit(lcd_spi, &t));
-}
-
-static void lcd_cmd_data(uint8_t cmd, const void *data, int len_bytes)
-{
-    lcd_send_cmd(cmd);
-    lcd_send_data(data, len_bytes);
-}
-
-static void lcd_set_addr_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
-{
-    uint8_t data[4];
-
-    data[0] = (x0 >> 8) & 0xFF;
-    data[1] = x0 & 0xFF;
-    data[2] = (x1 >> 8) & 0xFF;
-    data[3] = x1 & 0xFF;
-    lcd_cmd_data(0x2A, data, 4);
-
-    data[0] = (y0 >> 8) & 0xFF;
-    data[1] = y0 & 0xFF;
-    data[2] = (y1 >> 8) & 0xFF;
-    data[3] = y1 & 0xFF;
-    lcd_cmd_data(0x2B, data, 4);
-
-    lcd_send_cmd(0x2C);
-}
-
-static void lcd_fill_color(uint16_t color)
-{
-    static uint16_t line[TFT_WIDTH];
-    uint8_t madctl = 0x08;
-    uint8_t colmod = 0x55;
-
-    for (int i = 0; i < TFT_WIDTH; i++) {
-        line[i] = (uint16_t)((color << 8) | (color >> 8));
-    }
-
-    lcd_cmd_data(0x36, &madctl, 1);
-    lcd_cmd_data(0x3A, &colmod, 1);
-
-    lcd_set_addr_window(0, 0, TFT_WIDTH - 1, TFT_HEIGHT - 1);
-
-    for (int y = 0; y < TFT_HEIGHT; y++) {
-        lcd_send_data(line, sizeof(line));
+    for (int y = 0; y < TFT_V_RES; y++) {
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, y, TFT_H_RES, y + 1, line));
     }
 }
 
-static void lcd_init_minimal(void)
-{
-    uint8_t data;
+void app_main(void) {
+    if (PIN_NUM_BCKL >= 0) {
+        gpio_config_t io_conf = {
+            .mode = GPIO_MODE_OUTPUT,
+            .pin_bit_mask = 1ULL << PIN_NUM_BCKL,
+        };
+        ESP_ERROR_CHECK(gpio_config(&io_conf));
+        gpio_set_level(PIN_NUM_BCKL, 1);
+    }
 
-    lcd_send_cmd(0x01);
-    vTaskDelay(pdMS_TO_TICKS(150));
-
-    lcd_send_cmd(0x11);
-    vTaskDelay(pdMS_TO_TICKS(120));
-
-    data = 0x55;
-    lcd_cmd_data(0x3A, &data, 1);
-
-    data = 0x08;
-    lcd_cmd_data(0x36, &data, 1);
-
-    lcd_send_cmd(0x21);
-
-    data = 0x00;
-    lcd_cmd_data(0x36, &data, 1);
-
-    lcd_send_cmd(0x29);
-
-    vTaskDelay(pdMS_TO_TICKS(20));
-}
-
-void app_main(void)
-{
-    ESP_LOGI(TAG, "raw spi lcd test start");
-
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << PIN_NUM_DC) | (1ULL << PIN_NUM_RST),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = 0,
-        .pull_down_en = 0,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    ESP_ERROR_CHECK(gpio_config(&io_conf));
-
+    // Optional: du kannst auch das Makro aus esp_lcd_st7735.h nehmen:
+    // spi_bus_config_t buscfg = st7735_PANEL_BUS_SPI_CONFIG(PIN_NUM_SCLK, PIN_NUM_MOSI, TFT_H_RES * TFT_V_RES * 2);
     spi_bus_config_t buscfg = {
-        .miso_io_num = -1,
-        .mosi_io_num = PIN_NUM_MOSI,
         .sclk_io_num = PIN_NUM_SCLK,
+        .mosi_io_num = PIN_NUM_MOSI,
+        .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = TFT_WIDTH * 2
+        .max_transfer_sz = TFT_H_RES * TFT_V_RES * 2,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 10 * 1000 * 1000,
-        .mode = 3,
-        .spics_io_num = PIN_NUM_CS,
-        .queue_size = 1
+    esp_lcd_panel_io_handle_t io_handle = NULL;
+
+    // Optional: Makro aus esp_lcd_st7735.h:
+    // esp_lcd_panel_io_spi_config_t io_config = st7735_PANEL_IO_SPI_CONFIG(PIN_NUM_CS, PIN_NUM_DC, NULL, NULL);
+    esp_lcd_panel_io_spi_config_t io_config = {
+        .dc_gpio_num = PIN_NUM_DC,
+        .cs_gpio_num = PIN_NUM_CS,
+        .pclk_hz = 10 * 1000 * 1000,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .spi_mode = 0,
+        .trans_queue_depth = 10,
     };
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &lcd_spi));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle));
 
-    lcd_reset();
-    ESP_LOGI(TAG, "reset done");
+    esp_lcd_panel_handle_t panel_handle = NULL;
 
-    lcd_init_minimal();
-    ESP_LOGI(TAG, "minimal init done");
+    // Vendor config: NULL = Default-Init aus der Komponente
+    esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = PIN_NUM_RST,
+        .color_space = ESP_LCD_COLOR_SPACE_RGB,
+        .bits_per_pixel = 16,
+        .vendor_config = NULL,
+    };
+
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(io_handle, &panel_config, &panel_handle));
+
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+
+    // Diese drei Schalter sind bei ST7735-Modulen oft nötig (je nach “Tab”-Variante).
+    // Wenn du nachher falsche Farben/Orientierung hast: einzeln togglen/testen.
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
+
+    ESP_LOGI(TAG, "Test colors (wenn das klappt, klappt auch die Flamme)");
+    fill_solid_color(panel_handle, 0x2F0F); // rot
+    vTaskDelay(pdMS_TO_TICKS(500));
+    fill_solid_color(panel_handle, 0xFFF0); // grün
+    vTaskDelay(pdMS_TO_TICKS(500));
+    fill_solid_color(panel_handle, 0xF0FF); // blau
+    vTaskDelay(pdMS_TO_TICKS(500));
+    fill_solid_color(panel_handle, 0x0000); // schwarz
+
 
     while (1) {
-        ESP_LOGI(TAG, "red");
-        lcd_fill_color(0xF800);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified1));
 
-        ESP_LOGI(TAG, "green");
-        lcd_fill_color(0x07E0);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified2));
 
-        ESP_LOGI(TAG, "blue");
-        lcd_fill_color(0x001F);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified3));
 
-        ESP_LOGI(TAG, "white");
-        lcd_fill_color(0xFFFF);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified4));
 
-        ESP_LOGI(TAG, "black");
-        lcd_fill_color(0x0000);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified6));
+
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified7));
+
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified8));
+
+        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified9));
     }
 }
 
