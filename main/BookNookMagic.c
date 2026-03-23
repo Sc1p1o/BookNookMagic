@@ -49,7 +49,8 @@ static void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565
     }
 }
 
-void app_main(void) {
+void animaltion_task(void *pvParameters)
+{
     if (PIN_NUM_BCKL >= 0) {
         gpio_config_t io_conf = {
             .mode = GPIO_MODE_OUTPUT,
@@ -105,13 +106,6 @@ void app_main(void) {
     // Wenn du nachher falsche Farben/Orientierung hast: einzeln togglen/testen.
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
 
-    ESP_LOGI(TAG, "Test colors (wenn das klappt, klappt auch die Flamme)");
-    fill_solid_color(panel_handle, 0x2F0F); // rot
-    vTaskDelay(pdMS_TO_TICKS(500));
-    fill_solid_color(panel_handle, 0xFFF0); // grün
-    vTaskDelay(pdMS_TO_TICKS(500));
-    fill_solid_color(panel_handle, 0xF0FF); // blau
-    vTaskDelay(pdMS_TO_TICKS(500));
     fill_solid_color(panel_handle, 0x0000); // schwarz
 
 
@@ -140,6 +134,18 @@ void app_main(void) {
         vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
         ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified9));
     }
+}
+
+void presence_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Presence Task started");
+}
+
+void app_main(void) {
+
+    xTaskCreate(animaltion_task, "animation_task", 4096, NULL, 5, NULL); // ( TaskName, TaskStackSize, TaskParameter, TaskPriority, TaskHandle
+    xTaskCreate(presence_task, "presence_task", 4096, NULL, 5, NULL); // ( TaskName, TaskStackSize, TaskParameter, TaskPriority, TaskHandle
+
 }
 
 
