@@ -1,61 +1,328 @@
-#include <stdio.h>
-#include <string.h>
-#include "esp_err.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_log.h"
-#include "esp_netif.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "nvs_flash.h"
-#include "sdkconfig.h"
+#include "BookNookMagic.h"
+
+typedef struct {
+    char *data;
+    size_t length;
+} http_response_buffer_t;
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+} image_buffer_t;
 
 
 
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
+bool g_server_online = false;
+const char *TAG = "BookNookMagic";
+char http_response_buffer[4096];
+int http_response_length = 0;
+EventGroupHandle_t wifi_event_group = NULL;
 
-// ST7735 Treiber aus managed_components:
-#include "esp_lcd_st7735.h"
+static spi_device_handle_t g_tft_spi;
 
-#include "Flame1.h"
-#include "FlameUnified1.h"
-#include "FlameUnified2.h"
-#include "FlameUnified3.h"
-#include "FlameUnified4.h"
-#include "FlameUnified6.h"
-#include "FlameUnified7.h"
-#include "FlameUnified8.h"
-#include "FlameUnified9.h"
-
-#define PIN_NUM_SCLK    18   // SCK
-#define PIN_NUM_MOSI    23   // SDA (MOSI)
-#define PIN_NUM_CS      5    // CS
-#define PIN_NUM_DC      16   // A0 (D/C)
-#define PIN_NUM_RST     17   // RESET
-#define PIN_NUM_BCKL    4    // LED (Backlight) - optional, -1 wenn fest an 3V3
-
-#define TFT_H_RES       128
-#define TFT_V_RES       160
-
-#define FRAME_TIME_MS   200
-
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
-#define MAXIMUM_RETRY      5
-
-static const char *TAG = "wifi station";
-static EventGroupHandle_t wifi_event_group;
 static int s_retry_num = 0;
 
-static const char *TAG = "tft";
+esp_lcd_panel_handle_t panel_handle = NULL;
 
 
 
-static void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565)
+
+void trim_newline(char *str)
+{
+    if (str == NULL) {
+        return;
+    }
+
+    size_t len = strlen(str);
+    while (len > 0 && (str[len - 1] == '\n' || str[len - 1] == '\r')) {
+        str[len - 1] = '\0';
+        len--;
+    }
+}
+
+int uart_read_line(char *buffer, size_t max_len, bool echo, bool mask_input)
+{
+    if (buffer == NULL || max_len == 0) {
+        return -1;
+    }
+
+    size_t index = 0;
+    uint8_t ch = 0;
+
+    while (1) {
+        int len = uart_read_bytes(UART_NUM_0, &ch, 1, portMAX_DELAY);
+        if (len <= 0) {
+            continue;
+        }
+
+        if (ch == '\r' || ch == '\n') {
+            uart_write_bytes(UART_NUM_0, "\r\n", 2);
+            break;
+        }
+
+        if ((ch == '\b' || ch == 127) && index > 0) {
+            index--;
+            if (echo || mask_input) {
+                uart_write_bytes(UART_NUM_0, "\b \b", 3);
+            }
+            continue;
+        }
+
+        if (index < (max_len - 1)) {
+            buffer[index++] = (char)ch;
+
+            if (echo) {
+                uart_write_bytes(UART_NUM_0, (const char *)&ch, 1);
+            } else if (mask_input) {
+                uart_write_bytes(UART_NUM_0, "*", 1);
+            }
+        }
+    }
+
+    buffer[index] = '\0';
+    return (int)index;
+}
+
+void uart_console_init(void)
+{
+    const uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        .source_clk = UART_SCLK_DEFAULT,
+#endif
+    };
+
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+}
+
+void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                        int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < 5) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGW(TAG, "Verbindung getrennt, neuer Versuch %d/5", s_retry_num);
+        } else {
+            xEventGroupSetBits(wifi_event_group, WIFI_FAILED_BIT);
+            ESP_LOGE(TAG, "WLAN-Verbindung fehlgeschlagen");
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        s_retry_num = 0;
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+        ESP_LOGI(TAG, "IP erhalten: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+
+
+void wifi_init_sta(void)
+{
+    wifi_event_group = xEventGroupCreate();
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT,
+        ESP_EVENT_ANY_ID,
+        &wifi_event_handler,
+        NULL,
+        NULL
+    ));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT,
+        IP_EVENT_STA_GOT_IP,
+        &wifi_event_handler,
+        NULL,
+        NULL
+    ));
+
+    wifi_config_t wifi_config = {0};
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+void wifi_connect_from_console(void)
+{
+    char ssid[33] = {0};
+    char password[65] = {0};
+    wifi_config_t wifi_config = {0};
+
+    uart_write_bytes(UART_NUM_0, "\r\n=== WLAN-Konfiguration ===\r\n", 31);
+    uart_write_bytes(UART_NUM_0, "SSID eingeben: ", 15);
+    uart_read_line(ssid, sizeof(ssid), true, false);
+    trim_newline(ssid);
+
+    uart_write_bytes(UART_NUM_0, "Passwort eingeben: ", 19);
+    uart_read_line(password, sizeof(password), false, true);
+    trim_newline(password);
+
+    if (strlen(ssid) == 0) {
+        ESP_LOGE(TAG, "SSID darf nicht leer sein");
+        return;
+    }
+
+    memset(&wifi_config, 0, sizeof(wifi_config));
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+
+    s_retry_num = 0;
+    xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
+
+    ESP_ERROR_CHECK(esp_wifi_disconnect());
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_connect());
+
+    ESP_LOGI(TAG, "Verbinde mit SSID: %s", ssid);
+
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAILED_BIT,
+        pdTRUE,
+        pdFALSE,
+        pdMS_TO_TICKS(20000)
+    );
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "WLAN erfolgreich verbunden");
+    } else if (bits & WIFI_FAILED_BIT) {
+        ESP_LOGE(TAG, "WLAN konnte nicht verbunden werden");
+    } else {
+        ESP_LOGE(TAG, "Timeout bei WLAN-Verbindung");
+    }
+}
+
+void test_server_health(void)
+{
+    esp_http_client_config_t config = {
+        .url = "http://api.m-miller.me/health",
+        .timeout_ms = 5000,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        g_server_online = false;
+        return;
+    }
+
+    g_server_online = (esp_http_client_perform(client) == ESP_OK);
+    ESP_LOGI(TAG, "Server online: %s", g_server_online ? "ja" : "nein");
+    esp_http_client_cleanup(client);
+}
+
+static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
+    http_response_buffer_t *buffer = (http_response_buffer_t *)evt->user_data;
+
+    switch (evt->event_id) {
+    case HTTP_EVENT_ON_DATA: {
+            char *new_data = realloc(buffer->data, buffer->length + evt->data_len + 1);
+            if (new_data == NULL) {
+                ESP_LOGE(TAG, "Kein Speicher fuer HTTP-Daten");
+                return ESP_FAIL;
+            }
+
+            buffer->data = new_data;
+            memcpy(buffer->data + buffer->length, evt->data, evt->data_len);
+            buffer->length += evt->data_len;
+            buffer->data[buffer->length] = '\0';
+            break;
+    }
+
+    default:
+        break;
+    }
+
+    return ESP_OK;
+}
+
+void fetch_and_print_image_links(void)
+{
+    http_response_buffer_t response = {
+        .data = NULL,
+        .length = 0
+    };
+
+    esp_http_client_config_t config = {
+        .url = "http://api.m-miller.me/images",
+        .event_handler = http_event_handler,
+        .user_data = &response,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "HTTP-Client konnte nicht initialisiert werden");
+        return;
+    }
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP-Request fehlgeschlagen: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        free(response.data);
+        return;
+    }
+
+    int status_code = esp_http_client_get_status_code(client);
+    if (status_code != 200) {
+        ESP_LOGE(TAG, "Unerwarteter HTTP-Status: %d", status_code);
+        esp_http_client_cleanup(client);
+        free(response.data);
+        return;
+    }
+
+    if (response.data == NULL) {
+        ESP_LOGE(TAG, "Leere Antwort erhalten");
+        esp_http_client_cleanup(client);
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(response.data);
+    if (root == NULL) {
+        ESP_LOGE(TAG, "JSON konnte nicht geparst werden");
+        esp_http_client_cleanup(client);
+        free(response.data);
+        return;
+    }
+
+    cJSON *images = cJSON_GetObjectItemCaseSensitive(root, "images");
+    if (!cJSON_IsArray(images)) {
+        ESP_LOGE(TAG, "'images' fehlt oder ist kein Array");
+        cJSON_Delete(root);
+        esp_http_client_cleanup(client);
+        free(response.data);
+        return;
+    }
+
+    cJSON *image = NULL;
+    cJSON_ArrayForEach(image, images) {
+        if (cJSON_IsString(image) && image->valuestring != NULL) {
+            printf("%s\n", image->valuestring);
+        }
+    }
+
+    cJSON_Delete(root);
+    esp_http_client_cleanup(client);
+    free(response.data);
+}
+
+void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565)
 {
     static uint16_t line[TFT_H_RES];
     for (int x = 0; x < TFT_H_RES; x++) {
@@ -66,7 +333,7 @@ static void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565
     }
 }
 
-void animaltion_task(void *pvParameters)
+void init_tft_panel(void)
 {
     if (PIN_NUM_BCKL >= 0) {
         gpio_config_t io_conf = {
@@ -77,8 +344,6 @@ void animaltion_task(void *pvParameters)
         gpio_set_level(PIN_NUM_BCKL, 1);
     }
 
-    // Optional: du kannst auch das Makro aus esp_lcd_st7735.h nehmen:
-    // spi_bus_config_t buscfg = st7735_PANEL_BUS_SPI_CONFIG(PIN_NUM_SCLK, PIN_NUM_MOSI, TFT_H_RES * TFT_V_RES * 2);
     spi_bus_config_t buscfg = {
         .sclk_io_num = PIN_NUM_SCLK,
         .mosi_io_num = PIN_NUM_MOSI,
@@ -91,20 +356,16 @@ void animaltion_task(void *pvParameters)
 
     esp_lcd_panel_io_handle_t io_handle = NULL;
 
-    // Optional: Makro aus esp_lcd_st7735.h:
-    // esp_lcd_panel_io_spi_config_t io_config = st7735_PANEL_IO_SPI_CONFIG(PIN_NUM_CS, PIN_NUM_DC, NULL, NULL);
     esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num = PIN_NUM_DC,
         .cs_gpio_num = PIN_NUM_CS,
-        .pclk_hz = 10 * 1000 * 1000,
+        .pclk_hz = 26 * 1000 * 1000,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
         .spi_mode = 0,
         .trans_queue_depth = 10,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle));
-
-    esp_lcd_panel_handle_t panel_handle = NULL;
 
     // Vendor config: NULL = Default-Init aus der Komponente
     esp_lcd_panel_dev_config_t panel_config = {
@@ -119,148 +380,46 @@ void animaltion_task(void *pvParameters)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
-    // Diese drei Schalter sind bei ST7735-Modulen oft nötig (je nach “Tab”-Variante).
-    // Wenn du nachher falsche Farben/Orientierung hast: einzeln togglen/testen.
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
 
-    fill_solid_color(panel_handle, 0x0000); // schwarz
-
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified1));
-
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified2));
-
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified3));
-
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified4));
-
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified6));
-
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified7));
-
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified8));
-
-        vTaskDelay(pdMS_TO_TICKS(FRAME_TIME_MS));
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, 115, 160, FlameUnified9));
-    }
+    ESP_LOGI(TAG, "Test colors (wenn das klappt, klappt auch die Flamme)");
 }
 
-void presence_task(void *pvParameters)
+
+void app_main(void)
 {
-    ESP_LOGI(TAG, "Presence Task started");
-}
-
-static void wifi_event_handler(void *arg,
-                               esp_event_base_t event_base,
-                               int32_t event_id,
-                               void *event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < MAXIMUM_RETRY) {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(TAG, "Verbindungsversuch erneut: %d/%d", s_retry_num, MAXIMUM_RETRY);
-        } else {
-            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
-        }
-        ESP_LOGI(TAG, "Verbindung zum WLAN getrennt");
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
-        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
-}
+    ESP_ERROR_CHECK(ret);
 
-void wifi_init_sta(void)
-{
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    wifi_config_t wifi_config = {0};
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-
-    wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
-
-    strncpy((char *)wifi_config.sta.ssid,
-            CONFIG_BOOKNOOK_WIFI_SSID,
-            sizeof(wifi_config.sta.ssid) - 1);
-
-    strncpy((char *)wifi_config.sta.password,
-            CONFIG_BOOKNOOK_WIFI_PASSWORD,
-            sizeof(wifi_config.sta.password) - 1);
-
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_config.sta.pmf_cfg.capable = true;
-    wifi_config.sta.pmf_cfg.required = false;
-
-    ESP_LOGI(TAG,
-             "Verbinde mit SSID:%s Passwort:%s",
-             CONFIG_BOOKNOOK_WIFI_SSID,
-             CONFIG_BOOKNOOK_WIFI_PASSWORD);
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           portMAX_DELAY);
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG,
-                 "connected to ap SSID:%s password:%s",
-                 CONFIG_BOOKNOOK_WIFI_SSID,
-                 CONFIG_BOOKNOOK_WIFI_PASSWORD);
-    } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG,
-                 "Verbindung fehlgeschlagen zu SSID:%s Passwort:%s",
-                 CONFIG_BOOKNOOK_WIFI_SSID,
-                 CONFIG_BOOKNOOK_WIFI_PASSWORD);
-    } else {
-        ESP_LOGE(TAG, "Unerwartetes Event");
-    }
-}
-
-
-void app_main(void) {
-
+    uart_console_init();
     wifi_init_sta();
+    wifi_connect_from_console();
 
-    xTaskCreate(animaltion_task, "animation_task", 4096, NULL, 5, NULL); // ( TaskName, TaskStackSize, TaskParameter, TaskPriority, TaskHandle
-    xTaskCreate(presence_task, "presence_task", 4096, NULL, 5, NULL); // ( TaskName, TaskStackSize, TaskParameter, TaskPriority, TaskHandle
+    while (!g_server_online)
+    {
+        test_server_health();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 
+    ESP_LOGI(TAG, "Server online");
+
+    fetch_and_print_image_links();
+
+    init_tft_panel();
+
+    while (1)
+    {
+        fill_solid_color(panel_handle, 0x2F0F); // rot
+        vTaskDelay(pdMS_TO_TICKS(500));
+        fill_solid_color(panel_handle, 0xFFF0); // grün
+        vTaskDelay(pdMS_TO_TICKS(500));
+        fill_solid_color(panel_handle, 0xF0FF); // blau
+        vTaskDelay(pdMS_TO_TICKS(500));
+        fill_solid_color(panel_handle, 0x0000); // schwarz
+    }
 }
-
-
 
