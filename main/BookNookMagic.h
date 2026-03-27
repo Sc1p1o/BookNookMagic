@@ -40,6 +40,7 @@
 
 #define TFT_H_RES       128
 #define TFT_V_RES       160
+#define TFT_FRAME_SIZE  (TFT_H_RES * TFT_V_RES * 2)
 
 #define IMAGE_DOWNLOAD_MAX_SIZE (64 * 1024)
 

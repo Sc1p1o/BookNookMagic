@@ -17,13 +17,14 @@ const char *TAG = "BookNookMagic";
 char http_response_buffer[4096];
 int http_response_length = 0;
 EventGroupHandle_t wifi_event_group = NULL;
+char server_urls[MAX_IMAGE_URLS][MAX_IMAGE_URL_LEN];
+int server_url_count = 0;
 
-static spi_device_handle_t g_tft_spi;
+
 
 static int s_retry_num = 0;
 
 esp_lcd_panel_handle_t panel_handle = NULL;
-
 
 
 
@@ -227,7 +228,7 @@ void test_server_health(void)
     esp_http_client_cleanup(client);
 }
 
-static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
+esp_err_t http_event_handler(esp_http_client_event_t *evt) {
     http_response_buffer_t *buffer = (http_response_buffer_t *)evt->user_data;
 
     switch (evt->event_id) {
@@ -260,7 +261,7 @@ void fetch_and_print_image_links(void)
     };
 
     esp_http_client_config_t config = {
-        .url = "http://api.m-miller.me/images",
+        .url = "http://api.m-miller.me/esp-images",
         .event_handler = http_event_handler,
         .user_data = &response,
     };
@@ -313,7 +314,10 @@ void fetch_and_print_image_links(void)
     cJSON *image = NULL;
     cJSON_ArrayForEach(image, images) {
         if (cJSON_IsString(image) && image->valuestring != NULL) {
-            printf("%s\n", image->valuestring);
+            ESP_LOGI(TAG, "Bild-URL: %s", image->valuestring);
+            strncpy(server_urls[server_url_count], image->valuestring, MAX_IMAGE_URL_LEN - 1);
+            server_urls[server_url_count][MAX_IMAGE_URL_LEN - 1] = '\0';
+            server_url_count++;
         }
     }
 
@@ -322,6 +326,7 @@ void fetch_and_print_image_links(void)
     free(response.data);
 }
 
+// Function for testing and debugging Screen Controlls
 void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565)
 {
     static uint16_t line[TFT_H_RES];
@@ -333,9 +338,8 @@ void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565)
     }
 }
 
-void init_tft_panel(void)
-{
-    if (PIN_NUM_BCKL >= 0) {
+void init_tft_panel(void) {
+	if (PIN_NUM_BCKL >= 0) {
         gpio_config_t io_conf = {
             .mode = GPIO_MODE_OUTPUT,
             .pin_bit_mask = 1ULL << PIN_NUM_BCKL,
@@ -354,6 +358,8 @@ void init_tft_panel(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
+
+
     esp_lcd_panel_io_handle_t io_handle = NULL;
 
     esp_lcd_panel_io_spi_config_t io_config = {
@@ -370,9 +376,10 @@ void init_tft_panel(void)
     // Vendor config: NULL = Default-Init aus der Komponente
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = PIN_NUM_RST,
-        .color_space = ESP_LCD_COLOR_SPACE_RGB,
         .bits_per_pixel = 16,
         .vendor_config = NULL,
+        .rgb_endian = LCD_RGB_ENDIAN_BGR
+
     };
 
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(io_handle, &panel_config, &panel_handle));
@@ -385,46 +392,18 @@ void init_tft_panel(void)
     ESP_LOGI(TAG, "Test colors (wenn das klappt, klappt auch die Flamme)");
 }
 
-static void image_buffer_free(image_buffer_t *buffer)
+bool download_image_rgb565(const char *url, uint8_t **image_data, size_t *image_size)
 {
-    if (buffer == NULL) {
-        return;
-    }
-
-    free(buffer->data);
-    buffer->data = NULL;
-    buffer->size = 0;
-}
-
-static bool image_looks_like_jpeg(const uint8_t *data, size_t size)
-{
-    if (data == NULL || size < 4) {
+    if (url == NULL || image_data == NULL || image_size == NULL) {
         return false;
     }
 
-    if (data[0] != 0xFF || data[1] != 0xD8) {
-        return false;
-    }
-
-    if (data[size - 2] != 0xFF || data[size - 1] != 0xD9) {
-        return false;
-    }
-
-    return true;
-}
-
-static bool image_download_jpeg(const char *url, image_buffer_t *out)
-{
-    if (url == NULL || out == NULL) {
-        return false;
-    }
-
-    out->data = NULL;
-    out->size = 0;
+    *image_data = NULL;
+    *image_size = 0;
 
     esp_http_client_config_t config = {
         .url = url,
-        .timeout_ms = 8000,
+        .timeout_ms = 10000,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -440,25 +419,9 @@ static bool image_download_jpeg(const char *url, image_buffer_t *out)
         return false;
     }
 
-    int header_result = esp_http_client_fetch_headers(client);
-    if (header_result < 0) {
-        ESP_LOGE(TAG, "Header konnten nicht gelesen werden");
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return false;
-    }
-
-    int status_code = esp_http_client_get_status_code(client);
-    if (status_code != 200) {
-        ESP_LOGE(TAG, "HTTP Status %d", status_code);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return false;
-    }
-
-    int content_length = esp_http_client_get_content_length(client);
+    int content_length = esp_http_client_fetch_headers(client);
     if (content_length <= 0 || content_length > IMAGE_DOWNLOAD_MAX_SIZE) {
-        ESP_LOGE(TAG, "Ungültige Content-Length: %d", content_length);
+        ESP_LOGE(TAG, "Ungueltige Content-Length: %d", content_length);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return false;
@@ -472,67 +435,100 @@ static bool image_download_jpeg(const char *url, image_buffer_t *out)
         return false;
     }
 
-    size_t total_read = 0;
-    while (total_read < (size_t)content_length) {
-        int remaining = content_length - (int)total_read;
-        int read_now = esp_http_client_read(client, (char *)(buffer + total_read), remaining);
-
+    int total_read = 0;
+    while (total_read < content_length) {
+        int read_now = esp_http_client_read(client, (char *)buffer + total_read, content_length - total_read);
         if (read_now < 0) {
-            ESP_LOGE(TAG, "Lesefehler beim Download");
+            ESP_LOGE(TAG, "HTTP read Fehler");
             free(buffer);
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return false;
         }
-
         if (read_now == 0) {
             break;
         }
-
-        total_read += (size_t)read_now;
+        total_read += read_now;
     }
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
-    if (total_read != (size_t)content_length) {
-        ESP_LOGE(TAG, "Unvollständiger Download: %u von %d Bytes",
-                 (unsigned)total_read, content_length);
+
+    if (total_read != content_length) {
+        ESP_LOGE(TAG, "Unvollstaendiger Download: %d von %d Bytes", total_read, content_length);
         free(buffer);
         return false;
     }
 
-    if (!image_looks_like_jpeg(buffer, total_read)) {
-        ESP_LOGE(TAG, "Datei ist kein gültig wirkendes JPEG");
-        free(buffer);
-        return false;
-    }
-
-    out->data = buffer;
-    out->size = total_read;
-
-    ESP_LOGI(TAG, "JPEG geladen: %u Bytes", (unsigned)out->size);
+    *image_data = buffer;
+    *image_size = (size_t)total_read;
     return true;
 }
 
-static void test_image_download(void)
+
+void download_and_display_image(const char *url)
 {
-    image_buffer_t image = {0};
+    uint8_t *image_data = NULL;
+    size_t image_size = 0;
 
-    const char *url = "http://api.m-miller.me/assets/1774591232379-image-0.jpg";
-
-    if (image_download_jpeg(url, &image)) {
-        ESP_LOGI(TAG, "Bild erfolgreich geladen, Größe: %u", (unsigned)image.size);
-
-        /* Später hier: JPEG dekodieren und aufs Display zeichnen */
-
-        image_buffer_free(&image);
-    } else {
-        ESP_LOGE(TAG, "Bilddownload fehlgeschlagen");
+    if (panel_handle == NULL) {
+        ESP_LOGE(TAG, "Panel ist NULL");
+        return;
     }
+
+    bool ok = download_image_rgb565(url, &image_data, &image_size);
+    if (!ok) {
+        ESP_LOGE(TAG, "Download fehlgeschlagen");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Bild geladen: %u Bytes", (unsigned)image_size);
+
+    if (image_size != TFT_FRAME_SIZE) {
+        ESP_LOGE(TAG, "Falsche Bildgroesse. Erwartet %u Bytes, erhalten %u Bytes",
+                 (unsigned)TFT_FRAME_SIZE, (unsigned)image_size);
+        free(image_data);
+        return;
+    }
+
+    esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES, TFT_V_RES, image_data);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Anzeige fehlgeschlagen: %s", esp_err_to_name(err));
+        free(image_data);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Bild angezeigt");
+    free(image_data);
 }
 
 
+void slideshow_task(void *arg)
+{
+    while (1) {
+
+        memset(server_urls, 0, sizeof(server_urls));
+        server_url_count = 0;
+
+        fetch_and_print_image_links();
+        ESP_LOGI(TAG, "Count %d",server_url_count);
+
+        if (server_url_count <= 0) {
+            ESP_LOGW(TAG, "Keine Bilder gefunden");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            continue;
+        }
+
+        for (int i = 0; i < server_url_count; ++i) {
+            ESP_LOGI(TAG, "Bild %d von %d", i + 1, server_url_count);
+            download_and_display_image(server_urls[i]);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        ESP_LOGI(TAG, "Count %d",server_url_count);
+
+    }
+}
 
 void app_main(void)
 {
@@ -546,6 +542,7 @@ void app_main(void)
     uart_console_init();
     wifi_init_sta();
     wifi_connect_from_console();
+    init_tft_panel();
 
     while (!g_server_online)
     {
@@ -557,20 +554,8 @@ void app_main(void)
 
     fetch_and_print_image_links();
 
-    init_tft_panel();
+    xTaskCreate(slideshow_task, "slideshow_task", 12288, NULL, 15, NULL);
 
-    while (1)
-    {
-        fill_solid_color(panel_handle, 0x2F0F); // rot
-        vTaskDelay(pdMS_TO_TICKS(500));
-        fill_solid_color(panel_handle, 0xFFF0); // grün
-        vTaskDelay(pdMS_TO_TICKS(500));
-        fill_solid_color(panel_handle, 0xF0FF); // blau
-        vTaskDelay(pdMS_TO_TICKS(500));
-        fill_solid_color(panel_handle, 0x0000); // schwarz
-        vTaskDelay(pdMS_TO_TICKS(500));
-        test_image_download();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+
 }
 
