@@ -385,6 +385,154 @@ void init_tft_panel(void)
     ESP_LOGI(TAG, "Test colors (wenn das klappt, klappt auch die Flamme)");
 }
 
+static void image_buffer_free(image_buffer_t *buffer)
+{
+    if (buffer == NULL) {
+        return;
+    }
+
+    free(buffer->data);
+    buffer->data = NULL;
+    buffer->size = 0;
+}
+
+static bool image_looks_like_jpeg(const uint8_t *data, size_t size)
+{
+    if (data == NULL || size < 4) {
+        return false;
+    }
+
+    if (data[0] != 0xFF || data[1] != 0xD8) {
+        return false;
+    }
+
+    if (data[size - 2] != 0xFF || data[size - 1] != 0xD9) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool image_download_jpeg(const char *url, image_buffer_t *out)
+{
+    if (url == NULL || out == NULL) {
+        return false;
+    }
+
+    out->data = NULL;
+    out->size = 0;
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .timeout_ms = 8000,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "esp_http_client_init fehlgeschlagen");
+        return false;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP open fehlgeschlagen: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    int header_result = esp_http_client_fetch_headers(client);
+    if (header_result < 0) {
+        ESP_LOGE(TAG, "Header konnten nicht gelesen werden");
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    int status_code = esp_http_client_get_status_code(client);
+    if (status_code != 200) {
+        ESP_LOGE(TAG, "HTTP Status %d", status_code);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    int content_length = esp_http_client_get_content_length(client);
+    if (content_length <= 0 || content_length > IMAGE_DOWNLOAD_MAX_SIZE) {
+        ESP_LOGE(TAG, "Ungültige Content-Length: %d", content_length);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    uint8_t *buffer = malloc((size_t)content_length);
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "malloc fehlgeschlagen");
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    size_t total_read = 0;
+    while (total_read < (size_t)content_length) {
+        int remaining = content_length - (int)total_read;
+        int read_now = esp_http_client_read(client, (char *)(buffer + total_read), remaining);
+
+        if (read_now < 0) {
+            ESP_LOGE(TAG, "Lesefehler beim Download");
+            free(buffer);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return false;
+        }
+
+        if (read_now == 0) {
+            break;
+        }
+
+        total_read += (size_t)read_now;
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (total_read != (size_t)content_length) {
+        ESP_LOGE(TAG, "Unvollständiger Download: %u von %d Bytes",
+                 (unsigned)total_read, content_length);
+        free(buffer);
+        return false;
+    }
+
+    if (!image_looks_like_jpeg(buffer, total_read)) {
+        ESP_LOGE(TAG, "Datei ist kein gültig wirkendes JPEG");
+        free(buffer);
+        return false;
+    }
+
+    out->data = buffer;
+    out->size = total_read;
+
+    ESP_LOGI(TAG, "JPEG geladen: %u Bytes", (unsigned)out->size);
+    return true;
+}
+
+static void test_image_download(void)
+{
+    image_buffer_t image = {0};
+
+    const char *url = "http://api.m-miller.me/assets/1774591232379-image-0.jpg";
+
+    if (image_download_jpeg(url, &image)) {
+        ESP_LOGI(TAG, "Bild erfolgreich geladen, Größe: %u", (unsigned)image.size);
+
+        /* Später hier: JPEG dekodieren und aufs Display zeichnen */
+
+        image_buffer_free(&image);
+    } else {
+        ESP_LOGE(TAG, "Bilddownload fehlgeschlagen");
+    }
+}
+
+
 
 void app_main(void)
 {
@@ -420,6 +568,9 @@ void app_main(void)
         fill_solid_color(panel_handle, 0xF0FF); // blau
         vTaskDelay(pdMS_TO_TICKS(500));
         fill_solid_color(panel_handle, 0x0000); // schwarz
+        vTaskDelay(pdMS_TO_TICKS(500));
+        test_image_download();
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 

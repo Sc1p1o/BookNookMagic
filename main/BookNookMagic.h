@@ -41,6 +41,8 @@
 #define TFT_H_RES       128
 #define TFT_V_RES       160
 
+#define IMAGE_DOWNLOAD_MAX_SIZE (64 * 1024)
+
 extern bool g_server_online;
 extern const char *TAG;
 extern char http_response_buffer[4096];
