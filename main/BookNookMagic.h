@@ -32,11 +32,11 @@
 #define MAX_IMAGE_URL_LEN  256
 
 #define PIN_NUM_SCLK    18
-#define PIN_NUM_MOSI    23
-#define PIN_NUM_CS      5
-#define PIN_NUM_DC      16
-#define PIN_NUM_RST     17
-#define PIN_NUM_BCKL    4
+#define PIN_NUM_MOSI    19
+#define PIN_NUM_CS      23
+#define PIN_NUM_DC      21
+#define PIN_NUM_RST     22
+#define PIN_NUM_BCKL    17
 
 #define TFT_H_RES       128
 #define TFT_V_RES       160

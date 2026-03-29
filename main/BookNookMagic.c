@@ -1,4 +1,5 @@
 #include "BookNookMagic.h"
+#include "Flame1.h"
 
 typedef struct {
     char *data;
@@ -339,7 +340,7 @@ void fill_solid_color(esp_lcd_panel_handle_t panel, uint16_t color_rgb565)
 }
 
 void init_tft_panel(void) {
-	if (PIN_NUM_BCKL >= 0) {
+    if (PIN_NUM_BCKL >= 0) {
         gpio_config_t io_conf = {
             .mode = GPIO_MODE_OUTPUT,
             .pin_bit_mask = 1ULL << PIN_NUM_BCKL,
@@ -358,10 +359,7 @@ void init_tft_panel(void) {
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-
-
     esp_lcd_panel_io_handle_t io_handle = NULL;
-
     esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num = PIN_NUM_DC,
         .cs_gpio_num = PIN_NUM_CS,
@@ -373,23 +371,24 @@ void init_tft_panel(void) {
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle));
 
-    // Vendor config: NULL = Default-Init aus der Komponente
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = PIN_NUM_RST,
+        .color_space = ESP_LCD_COLOR_SPACE_RGB,
         .bits_per_pixel = 16,
         .vendor_config = NULL,
-        .rgb_endian = LCD_RGB_ENDIAN_BGR
-
     };
 
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(io_handle, &panel_config, &panel_handle));
-
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
 
-    ESP_LOGI(TAG, "Test colors (wenn das klappt, klappt auch die Flamme)");
+    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, false, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+
+    ESP_LOGI(TAG, "TFT Panel initialisiert");
 }
 
 bool download_image_rgb565(const char *url, uint8_t **image_data, size_t *image_size)
@@ -552,10 +551,15 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Server online");
 
+    while (true)
+    {
+        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES, TFT_V_RES, Flame1);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+
     fetch_and_print_image_links();
 
     xTaskCreate(slideshow_task, "slideshow_task", 12288, NULL, 15, NULL);
 
-
 }
-
