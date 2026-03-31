@@ -25,6 +25,20 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_st7735.h"
 
+#include <stdint.h>
+#include <stddef.h>
+
+
+
+#include "FlameUnified1.h"
+#include "FlameUnified2.h"
+#include "FlameUnified3.h"
+#include "FlameUnified4.h"
+#include "FlameUnified6.h"
+#include "FlameUnified7.h"
+#include "FlameUnified8.h"
+#include "FlameUnified9.h"
+
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAILED_BIT    BIT1
 
@@ -40,10 +54,15 @@
 
 #define TFT_H_RES       128
 #define TFT_V_RES       160
+
+#define TFT_H_RES_LOCAL 115
+#define TFT_V_RES_LOCAL 160
+
 #define TFT_FRAME_SIZE  (TFT_H_RES * TFT_V_RES * 2)
 
 #define IMAGE_DOWNLOAD_MAX_SIZE (64 * 1024)
 
+#define FRAME_LENGTH 200
 extern bool g_server_online;
 extern const char *TAG;
 extern char http_response_buffer[4096];

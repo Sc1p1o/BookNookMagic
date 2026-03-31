@@ -1,5 +1,4 @@
 #include "BookNookMagic.h"
-#include "Flame1.h"
 
 typedef struct {
     char *data;
@@ -236,7 +235,7 @@ esp_err_t http_event_handler(esp_http_client_event_t *evt) {
     case HTTP_EVENT_ON_DATA: {
             char *new_data = realloc(buffer->data, buffer->length + evt->data_len + 1);
             if (new_data == NULL) {
-                ESP_LOGE(TAG, "Kein Speicher fuer HTTP-Daten");
+                ESP_LOGE(TAG, "Kein Speicher für HTTP-Daten");
                 return ESP_FAIL;
             }
 
@@ -376,22 +375,23 @@ void init_tft_panel(void) {
         .color_space = ESP_LCD_COLOR_SPACE_RGB,
         .bits_per_pixel = 16,
         .vendor_config = NULL,
+
     };
 
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(io_handle, &panel_config, &panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
-
     ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, false));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, false, false));
     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+
 
     ESP_LOGI(TAG, "TFT Panel initialisiert");
 }
 
-bool download_image_rgb565(const char *url, uint8_t **image_data, size_t *image_size)
+bool download_image_rgb565(const char *url, uint16_t **image_data, size_t *image_size)
 {
     if (url == NULL || image_data == NULL || image_size == NULL) {
         return false;
@@ -420,13 +420,13 @@ bool download_image_rgb565(const char *url, uint8_t **image_data, size_t *image_
 
     int content_length = esp_http_client_fetch_headers(client);
     if (content_length <= 0 || content_length > IMAGE_DOWNLOAD_MAX_SIZE) {
-        ESP_LOGE(TAG, "Ungueltige Content-Length: %d", content_length);
+        ESP_LOGE(TAG, "Ungültige Content-Length: %d", content_length);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return false;
     }
 
-    uint8_t *buffer = malloc((size_t)content_length);
+    uint16_t *buffer = malloc((size_t)content_length);
     if (buffer == NULL) {
         ESP_LOGE(TAG, "malloc fehlgeschlagen");
         esp_http_client_close(client);
@@ -455,7 +455,7 @@ bool download_image_rgb565(const char *url, uint8_t **image_data, size_t *image_
 
 
     if (total_read != content_length) {
-        ESP_LOGE(TAG, "Unvollstaendiger Download: %d von %d Bytes", total_read, content_length);
+        ESP_LOGE(TAG, "Unvollständiger Download: %d von %d Bytes", total_read, content_length);
         free(buffer);
         return false;
     }
@@ -468,7 +468,7 @@ bool download_image_rgb565(const char *url, uint8_t **image_data, size_t *image_
 
 void download_and_display_image(const char *url)
 {
-    uint8_t *image_data = NULL;
+    uint16_t *image_data = NULL;
     size_t image_size = 0;
 
     if (panel_handle == NULL) {
@@ -485,18 +485,13 @@ void download_and_display_image(const char *url)
     ESP_LOGI(TAG, "Bild geladen: %u Bytes", (unsigned)image_size);
 
     if (image_size != TFT_FRAME_SIZE) {
-        ESP_LOGE(TAG, "Falsche Bildgroesse. Erwartet %u Bytes, erhalten %u Bytes",
+        ESP_LOGE(TAG, "Falsche Bildgrösse. Erwartet %u Bytes, erhalten %u Bytes",
                  (unsigned)TFT_FRAME_SIZE, (unsigned)image_size);
         free(image_data);
         return;
     }
 
-    esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES, TFT_V_RES, image_data);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Anzeige fehlgeschlagen: %s", esp_err_to_name(err));
-        free(image_data);
-        return;
-    }
+    esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES, TFT_V_RES, image_data);
 
     ESP_LOGI(TAG, "Bild angezeigt");
     free(image_data);
@@ -505,27 +500,65 @@ void download_and_display_image(const char *url)
 
 void slideshow_task(void *arg)
 {
+    fill_solid_color(panel_handle, 0x0000);
     while (1) {
+        if (g_server_online)
+        {
+            memset(server_urls, 0, sizeof(server_urls));
+            server_url_count = 0;
 
-        memset(server_urls, 0, sizeof(server_urls));
-        server_url_count = 0;
+            fetch_and_print_image_links();
+            ESP_LOGI(TAG, "Count %d",server_url_count);
 
-        fetch_and_print_image_links();
-        ESP_LOGI(TAG, "Count %d",server_url_count);
+            if (server_url_count <= 0) {
+                ESP_LOGW(TAG, "Keine Bilder gefunden");
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                continue;
+            }
 
-        if (server_url_count <= 0) {
-            ESP_LOGW(TAG, "Keine Bilder gefunden");
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            continue;
+            for (int i = 0; i < server_url_count; ++i) {
+                ESP_LOGI(TAG, "Bild %d von %d", i + 1, server_url_count);
+                download_and_display_image(server_urls[i]);
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+            ESP_LOGI(TAG, "Count %d",server_url_count);
+        }else
+        {
+
+            ESP_LOGI(TAG, "Server nicht erreichbar, Fallback aktiv");
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified1);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
+
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified2);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
+
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified3);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
+
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified4);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
+
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified6);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
+
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified7);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
+
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified8);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
+
+            esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified9);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
         }
 
-        for (int i = 0; i < server_url_count; ++i) {
-            ESP_LOGI(TAG, "Bild %d von %d", i + 1, server_url_count);
-            download_and_display_image(server_urls[i]);
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        ESP_LOGI(TAG, "Count %d",server_url_count);
+    }
+}
 
+void connection_task(void *arg)
+{
+    while (1) {
+        test_server_health();
+        vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
 
@@ -543,23 +576,8 @@ void app_main(void)
     wifi_connect_from_console();
     init_tft_panel();
 
-    while (!g_server_online)
-    {
-        test_server_health();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    ESP_LOGI(TAG, "Server online");
-
-    while (true)
-    {
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES, TFT_V_RES, Flame1);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-
-    fetch_and_print_image_links();
-
+    xTaskCreate(connection_task, "connection_task", 4096, NULL, 10, NULL);
     xTaskCreate(slideshow_task, "slideshow_task", 12288, NULL, 15, NULL);
+
 
 }

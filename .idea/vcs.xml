@@ -3,6 +3,7 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$USER_HOME$/esp/esp-idf" vcs="Git" />
     <mapping directory="$USER_HOME$/esp/esp-idf/components/bootloader/subproject/components/micro-ecc/micro-ecc" vcs="Git" />
     <mapping directory="$USER_HOME$/esp/esp-idf/components/bt/controller/lib_esp32" vcs="Git" />
     <mapping directory="$USER_HOME$/esp/esp-idf/components/bt/controller/lib_esp32c2/esp32c2-bt-lib" vcs="Git" />
