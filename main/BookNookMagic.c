@@ -384,7 +384,7 @@ void init_tft_panel(void) {
 
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
     ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, false));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, false, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, true, true));
     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
 
 
@@ -525,7 +525,7 @@ void slideshow_task(void *arg)
         }else
         {
 
-            ESP_LOGI(TAG, "Server nicht erreichbar, Fallback aktiv");
+            //ESP_LOGI(TAG, "Server nicht erreichbar, Fallback aktiv");
             esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, TFT_H_RES_LOCAL, TFT_V_RES_LOCAL, FlameUnified1);
             vTaskDelay(pdMS_TO_TICKS(FRAME_LENGTH));
 
@@ -562,6 +562,14 @@ void connection_task(void *arg)
     }
 }
 
+void wifi_task(void *arg)
+{
+    while (1) {
+        wifi_connect_from_console();
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -573,9 +581,9 @@ void app_main(void)
 
     uart_console_init();
     wifi_init_sta();
-    wifi_connect_from_console();
     init_tft_panel();
 
+    xTaskCreate(wifi_task, "wifi_task", 4096, NULL, 10, NULL);
     xTaskCreate(connection_task, "connection_task", 4096, NULL, 10, NULL);
     xTaskCreate(slideshow_task, "slideshow_task", 12288, NULL, 15, NULL);
 

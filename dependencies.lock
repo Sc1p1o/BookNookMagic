@@ -26,7 +26,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.4.2
+    version: 6.0.0
   waveshare/esp_lcd_st7735:
     component_hash: 811c4168555af5878eb9ec8c3eee8af277afebc3bc516bc0daa57656eee09c69
     dependencies: []

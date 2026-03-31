@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ESP-IDF_SETTINGS">
-    <option name="cmakeProfile" value="Debug-System" />
+    <option name="cmakeProfile" value="Debug-EspIdfAutoGen58b75279" />
     <option name="monitorBaud" value="Auto" />
     <option name="port" value="/dev/ttyUSB0" />
     <option name="uploadBaud" value="Auto" />
